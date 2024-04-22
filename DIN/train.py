@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import precision_score, recall_score, f1_score, roc_curve, auc
 import torch
 import matplotlib.pyplot as plt
 from DIN.inputs import (DenseFeat, SparseFeat, VarLenSparseFeat, get_feature_names)
@@ -122,6 +123,9 @@ def get_feats_columns_info(df, spase_columns, dense_columns, behavior_feat, his_
 if __name__ == '__main__':
     data = load_data()
     num_unique_data = num_unique_features(data)
+    # First, sort the DataFrame by 'userId' and 'timestamp' so that the most recent interactions are last
+    data = data.sort_values(by=['userId', 'timestamp'])
+
     # dense feature: normalize
     ContinuousFeatures = ['timestamp']
     MMS = MinMaxScaler()
@@ -134,8 +138,6 @@ if __name__ == '__main__':
     for feature in DiscreteFeatures:
         data[feature] = LE.fit_transform(data[[feature]].to_numpy())
 
-    # First, sort the DataFrame by 'userId' and 'timestamp' so that the most recent interactions are last
-    data = data.sort_values(by=['userId', 'timestamp'])
     # Split Train and Test
     split_data = data.groupby('userId', group_keys=False).apply(split_train_test, 0.8)
     # split_data 现在包含了每个用户的训练集和测试集，需要分别提取
@@ -146,6 +148,7 @@ if __name__ == '__main__':
 
     train_data = get_user_hist_beavior(df=train_data)
     train_data["label"] = train_data["rating"].map(lambda x: 1 if x > 3 else 0)
+    test_data = get_user_hist_beavior(df=test_data)
     test_data["label"] = test_data["rating"].map(lambda x: 1 if x > 3 else 0)
 
     # 从train_data中获取feature_columns和输入数据X
@@ -169,21 +172,23 @@ if __name__ == '__main__':
     behavior_feature_list = ["movieId"]  # history feature name
     y = train_data["label"].values
 
-    # feature name 如下
-    # ['user_id',
-    #  'movie_id',
-    #  'gender',
-    #  'age',
-    #  'occupation',
-    #  'zip',
-    #  'timestamp',
-    #  'hist_len',
-    #  'hist_movieId',
-    #  'seq_length']
 
-    # X是训练集，作为模型的输入
-    # print(x)
-    # x的格式如下，是一个字典: {feature name: np array of data}
+    """
+    feature name
+    ['user_id',
+    'movie_id',
+    'gender',
+    'age',
+    'occupation',
+    'zip',
+    'timestamp',
+    'hist_len',
+    'hist_movieId',
+    'seq_length']
+    """
+
+    # X is input for DIN
+    # X is a dictionary: {feature name: np array of data}
     # {'user_id': array([0, 0, 0, ..., 6039, 6039, 6039]),
     #  'movie_id': array([2969, 1178, 1574, ..., 1741, 155, 1131]),
     #  'gender': array([0, 0, 0, ..., 1, 1, 1]),
@@ -192,14 +197,15 @@ if __name__ == '__main__':
     #  'zip': array([1588, 1588, 1588, ..., 466, 466, 466]),
     #  'timestamp': array([0.24062316, 0.24062356, 0.24062356, ..., 0.4540416, 0.45404184,
     #                      0.46363028]),
-    #  'hist_len': array([50, 50, 50, ..., 50, 50, 50]),  pad过后长度相同
+    #  'hist_len': array([50, 50, 50, ..., 50, 50, 50]),  use padding to make the length equal
     #  'hist_movieId': array([[957, 2147, 1658, ..., 1439, 1727, 47],
     #                          [957, 2147, 1658, ..., 1439, 1727, 47],
     #                          [957, 2147, 1658, ..., 1439, 1727, 47],
     #                          ...,
     #                          [3313, 1132, 2711, ..., 1741, 155, 1131],
     #                          [3313, 1132, 2711, ..., 1741, 155, 1131],
-    #                          [3313, 1132, 2711, ..., 1741, 155, 1131]], dtype=int32), 每一个user的看过的最后50个电影的id
+    #                          [3313, 1132, 2711, ..., 1741, 155, 1131]], dtype=int32)
+    #                          ids for the most recent 50 movies user watched
     #  'seq_length': array([50, 50, 50, ..., 50, 50, 50]),
 
     device = 'cpu'
@@ -211,12 +217,71 @@ if __name__ == '__main__':
     model = DIN(feature_columns, behavior_feature_list, device=device, att_weight_normalization=True)
     model.compile('adagrad', 'binary_crossentropy', metrics=['binary_crossentropy', "auc"])
     # print(model)
-    # 训练
+    # Train model
     history = model.fit(X, y, batch_size=1024, epochs=10, shuffle=False, verbose=2, validation_split=0.2)
 
+    # Plot train loss
     plt.figure(figsize=(8, 4))
     plt.plot(history.history["loss"])
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    # plt.savefig("./imgs/loss.png")
+    plt.savefig("../Evaluation/Train_Loss_DIN.png")
     plt.show()
+
+    # Test
+    test_feature_columns, test_X = get_feats_columns_info(test_data
+                                                          , spase_columns=DiscreteFeatures
+                                                          , dense_columns=ContinuousFeatures + ["hist_len"]
+                                                          , behavior_feat=["movieId"]
+                                                          , his_behavior_fea=["hist_movieId"]
+                                                          )
+
+    prediction = model.predict(test_X, batch_size=1024)
+    print(prediction.shape)
+
+    # Convert probability predictions to binary labels
+    threshold = 0.5
+    y_pred = [1 if prob > threshold else 0 for prob in prediction]
+    y_true = test_data["label"].values
+    # Calculate precision, recall, and F-1 score
+    precision = precision_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+
+    print('Precision: {}'.format(precision))
+    print('Recall: {}'.format(recall))
+    print('F1 Score: {}'.format(f1))
+
+    # Calculate false positive rates and true positive rates using different thresholds
+    fpr, tpr, thresholds = roc_curve(y_true, prediction)
+    data_pr = pd.DataFrame({'fpr': fpr, 'tpr': tpr, 'thresholds': thresholds})
+    data_pr.to_csv("../Evaluation/Positive_Rates_DIN.csv")
+
+    # Calculate Area under ROC curve (AUC)
+    auc = auc(fpr, tpr)
+    print('AUC: {}'.format(auc))
+
+    # Plot ROC curve
+    plt.figure()
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label='ROC curve (area = %0.2f)' % auc)
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC')
+    plt.legend(loc="lower right")
+    plt.savefig("../Evaluation/ROC_DIN.png")
+    plt.show()
+
+    # Add predictions to test dataset
+    test_data['prediction'] = prediction
+    # Sort test dataset by prediction for each user
+    sorted_test_data = test_data.sort_values(['userId', 'prediction'], ascending=[True, False])
+    # Keep at most 10 movies with the highest predictions for each user
+    top10_rec_movies = sorted_test_data.groupby('userId').head(10)
+    print(top10_rec_movies)
+
+    top10_rec_movies.to_csv("../Evaluation/Movie_Recommendations_DIN.csv", index=False)
+
+
