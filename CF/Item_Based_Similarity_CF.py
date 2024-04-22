@@ -1,7 +1,10 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import MinMaxScaler
+
 
 
 def get_neighbors(similarity_matrix, num_neighbors):
@@ -9,7 +12,7 @@ def get_neighbors(similarity_matrix, num_neighbors):
     for i in range(similarity_matrix.shape[0]):
         # 从大到小排序索引
         sorted_indices = np.argsort(similarity_matrix[i])[::-1]
-        # 排除电影本身，选择 top-k
+        # Select the k most similar movies
         top_k_list = [(index, similarity_matrix[i][index]) for index in sorted_indices if index != i][:num_neighbors]
         top_k_similar[i] = top_k_list
     return top_k_similar
@@ -57,19 +60,40 @@ def recommend_movies(user, num_recommend_movies, predict_ratings, ratings):
     recommendations = [(unseen_movies[i], predict_ratings[unseen_movies[i], user]) for i in top_k_indices]
     return recommendations
 
+def split_train_test(user_group, train_ratio):
+    split_idx = int(len(user_group) * train_ratio)
+    return user_group.iloc[:split_idx], user_group.iloc[split_idx:]
+
 
 if __name__ == '__main__':
-    movie_ratings = pd.read_csv('../ml-latest-small/ratings.csv')
-    # Split Train/Test dataset
-    Train_ratings = movie_ratings[['rating', 'userId', 'movieId']]
-    Train_ratings = Train_ratings.pivot_table(index='movieId', columns='userId',
-                                              values='rating')  # We have the same users who bought the same item more than once
-    Train_ratings = Train_ratings.fillna(-1)  # dataframe <movie, user>矩阵
-    movie_id_to_index_mapping = pd.Series(range(0, len(Train_ratings)), index=Train_ratings.index).to_dict()
+    movie_ratings = pd.read_table("../ml-1m/ratings.dat", sep="::", engine="python",
+                                  header=None,
+                                  names=["userId", "movieId", "rating", "timestamp"]
+                                 )
+    movie_ratings = movie_ratings.sort_values(by=['userId', 'timestamp'])
+    # Timestamp is a continuous variable
+    ContinuousFeatures = ['timestamp']
+    MMS = MinMaxScaler()
+    for feature in ContinuousFeatures:
+        movie_ratings[feature] = MMS.fit_transform(movie_ratings[[feature]].to_numpy())
+    # Other variables are discrete
+    DiscreteFeatures = ['userId', 'movieId']
+    LE = LabelEncoder()
+    for feature in DiscreteFeatures:
+        movie_ratings[feature] = LE.fit_transform(movie_ratings[[feature]].to_numpy())
 
-    test_size_ratio = 0.2
-    train_set, Test_movie_ratings = train_test_split(movie_ratings, test_size=test_size_ratio, random_state=42)
-    Test_movie_ratings = Test_movie_ratings[['rating', 'userId', 'movieId']]  # dataframe
+    # Split train and test data by user
+    split_data = movie_ratings.groupby('userId', group_keys=False).apply(split_train_test, 0.8)
+    test_data = pd.concat([test for train, test in split_data])
+    print(test_data.shape)
+    Train_ratings = movie_ratings[['rating', 'userId', 'movieId']]
+    # Transform
+    Train_ratings = Train_ratings.pivot_table(index='movieId', columns='userId',
+                                              values='rating')
+    Train_ratings = Train_ratings.fillna(-1)
+    # movie_id_to_index_mapping = pd.Series(range(0, len(Train_ratings)), index=Train_ratings.index).to_dict()
+
+    Test_movie_ratings = test_data[['rating', 'userId', 'movieId']]  # dataframe
     for index, row in Test_movie_ratings.iterrows():
         user_id = row['userId']
         movie_id = row['movieId']
@@ -78,22 +102,70 @@ if __name__ == '__main__':
 
     # Train
     similarity_matrix = cosine_similarity(Train_ratings.to_numpy())
-    num_neighbor = 20
+    num_neighbor = 10
     top_k_similar = get_neighbors(similarity_matrix, num_neighbor)
     predict_ratings = predict_rating(Train_ratings.to_numpy(), top_k_similar)
 
     # Test and Evaluate, MAE
     N = Test_movie_ratings.shape[0]
     loss_rating = 0
+    prediction_list = []
     for index, row in Test_movie_ratings.iterrows():
         user_id = int(row['userId'])
         movie_id = int(row['movieId'])
         rating = row['rating']
-        loss_rating += abs(rating - predict_ratings[movie_id_to_index_mapping[movie_id], user_id-1])
+        prediction_list.append(predict_ratings[movie_id, user_id-1])
+        loss_rating += abs(rating - predict_ratings[movie_id, user_id-1])
     MAE = loss_rating / N
     print(MAE)
 
-    # plt
+    # Tune the parameter of neighborhood numbers
+    num_neighbors_list = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200]
+    MAE_list = []
+    predictions_list ={}
+    recommendations_list ={}
+
+    for num_neighbor in num_neighbors_list:
+        top_k_similar = get_neighbors(similarity_matrix, num_neighbor)
+        predict_ratings = predict_rating(Train_ratings.to_numpy(),
+                                         top_k_similar)
+
+        N = Test_movie_ratings.shape[0]
+        loss_rating = 0
+        prediction_list = []
+
+        for index, row in Test_movie_ratings.iterrows():
+            user_id = int(row['userId'])
+            movie_id = int(row['movieId'])
+            rating = row['rating']
+            prediction_list.append(predict_ratings[movie_id, user_id - 1])
+            loss_rating += abs(rating - predict_ratings[movie_id, user_id - 1])
+        MAE_list.append(loss_rating / N)
+        print(MAE_list)
+        Test_movie_ratings['prediction'] = prediction_list
+        sorted_test_data = Test_movie_ratings.sort_values(['userId', 'prediction'], ascending=[True, False])
+        top10_rec_movies = sorted_test_data.groupby('userId').head(10)
+        top10_rec_movies.to_csv('../Evaluation/top10_rec_movies_' + str(num_neighbor) + '.csv', index=False)
+        predictions_list[num_neighbor] = prediction_list
+
+    MAE_df = pd.DataFrame(list(zip(num_neighbors_list, MAE_list)),
+                          columns=['No. of Neighbors', 'MAE'])
+
+    print(MAE_df)
+
+    plt.scatter(MAE_df['No. of Neighbors'], MAE_df['MAE'])
+    plt.plot(MAE_df['No. of Neighbors'], MAE_df['MAE'])
+    plt.xlabel('No. of Neighbors')
+    plt.ylabel('MAE')
+    plt.savefig('../Evaluation/MAE_ItemCF.png')
+
+    df_predictions = pd.DataFrame(predictions_list)
+    test_data_with_predictions = pd.concat([Test_movie_ratings, df_predictions], axis=1, join='inner')
+    test_data_with_predictions.to_csv('../Evaluation/test_data_with_predictions.csv', index=False)
+
+
+
+
 
 
 
