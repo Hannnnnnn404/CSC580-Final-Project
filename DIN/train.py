@@ -151,6 +151,11 @@ if __name__ == '__main__':
     test_data = get_user_hist_beavior(df=test_data)
     test_data["label"] = test_data["rating"].map(lambda x: 1 if x > 3 else 0)
 
+    test_sorted = test_data.sort_values(['userId', 'rating'], ascending=[True,False])
+    test_sorted = test_sorted[['userId', 'movieId', 'rating', 'label']]
+
+    test_sorted.to_csv('../Evaluation/test_data.csv', index=False)
+
     # 从train_data中获取feature_columns和输入数据X
     feature_columns, X = get_feats_columns_info(train_data
                                                 , spase_columns=DiscreteFeatures
